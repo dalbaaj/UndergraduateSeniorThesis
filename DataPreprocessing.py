@@ -37,6 +37,8 @@ data.BMI.replace(0, np.median(data.BMI), inplace = True)
 # replot the histograms to show the new distributions
 (data != 0).sum(0)
 
+# need to encode the pregnancy column, if > 1 change value to 1
+data.Pregnancies = np.where(data.Pregnancies != 0, 1, data.Pregnancies)
 
-# will need to go back and do this all over again with the scikit learn package 
+# will need to build imputing into pipeline
 # must first separate into training and testing set in order to prevent any bias and other issues
