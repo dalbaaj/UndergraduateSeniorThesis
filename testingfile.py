@@ -1,61 +1,65 @@
 import numpy as np
 import pandas as pd
+import random as random
 import matplotlib.pyplot as plt
 import xgboost as xgb
 from xgboost import XGBClassifier
-%matplotlib inline
+#%matplotlib inline
 
 # from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import FunctionTransformer
-# from sklearn.compose import ColumnTransformer
-# from sklearn.compose import make_column_selector
 
-from sklearn.preprocessing import Binarizer
+
+from sklearn.preprocessing import RobustScaler
 from sklearn.impute import KNNImputer
 from sklearn.model_selection import train_test_split
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_validate
 from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import auc, plot_roc_curve, confusion_matrix, ConfusionMatrixDisplay
 
 
 # load data
 data = pd.read_csv(r'C:\Users\danah\Documents\SeniorThesis\diabetes.csv')
 # split data into X and y
-data.Pregnancies = np.where(data.Pregnancies != 0, 1, data.Pregnancies)
 X = data.drop(columns = ['Outcome'])
 y = data['Outcome'].to_numpy()
 
-
-missing_vals_ix = X.columns[1:6]
-
-for i in missing_vals_ix:
-    X.loc[:, i].replace(0, np.nan, inplace = True)
-
-imputer = KNNImputer(weights='distance')
-model = xgb.XGBClassifier(objective = 'binary:logistic', eval_metric = 'auc', use_label_encoder=False, learning_rate = 0.1, n_estimators = 10, max_depth = 5, alpha = 10)
-
-
-clf = Pipeline(steps=[('imputer', imputer), ('XGBoost', model)])
-
+X.Pregnancies = np.where(X.Pregnancies != 0, 1, X.Pregnancies)
+missing_cols = tuple([X.columns[i] for i in range(1,7)])
+X.loc[:, missing_cols].replace(0, np.nan, inplace = True)
 
 # split data into train and test sets
 seed = 7
 test_size = 0.3
-#X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = test_size, random_state = seed)
-# need to do cross validation up here, clf should represent the pipeline
-# need to build the cv into the pipeline
-# so the split of the training and testing happens multiple times!
+scaler = RobustScaler(quantile_range=(1.0, 99.0), with_centering=False)
+imputer = KNNImputer(weights='distance')
 
-scores = cross_val_score(clf, X, y, cv = 5)
+model = XGBClassifier( 
+learning_rate =0.2, 
+n_estimators=1000, 
+max_depth=2,
+min_child_weight=2, 
+gamma=0.2, 
+subsample=0.6, 
+colsample_bytree=0.55,
+reg_alpha = 1e-5,
+objective= 'binary:logistic', 
+eval_metric = 'auc', 
+nthread=4, 
+scale_pos_weight=1, 
+seed=27, 
+use_label_encoder = False)
 
+skf = StratifiedKFold(n_splits=5)
 
-# make predictions for test data
-# y_pred = model.predict(X_test)
-# predictions = [round(value) for value in y_pred]
-# evaluate predictions
-# accuracy = accuracy_score(y_test, predictions)
-print("Accuracy score before genetic algorithm: %.2f%%" % (np.mean(scores) * 100.0))
+clf = Pipeline([
+        ('scaler', scaler), 
+        ('imputer', imputer),
+        ('XGBoost', model)])
 
-# note everything in the dataset is a numerical value, just like the example below
+cv_results = cross_validate(clf, X, y, cv = skf, scoring = 'roc_auc')
+print("Accuracy score before genetic algorithm: %.2f%%" % (np.mean(cv_results['test_score']) * 100.0))
 
 #defining various steps required for the genetic algorithm
 def initialization_of_population(size,n_feat):
@@ -70,8 +74,9 @@ def initialization_of_population(size,n_feat):
 def fitness_score(population):
     scores = []
     for chromosome in population:
-        cv_score = cross_val_score(clf, X.iloc[:,chromosome], y, cv = 10)
-        scores.append(np.mean(cv_score))
+        clf.fit(Xtr.iloc[:, chromosome], ytr)
+        predictions = clf.predict_proba(Xts.iloc[:, chromosome])
+        scores.append(roc_auc_score(yts, predictions[:,1])) # predictions must be 1d array
     scores, population = np.array(scores), np.array(population) 
     inds = np.argsort(scores)
     return list(scores[inds][::-1]), list(population[inds,:][::-1])
@@ -103,7 +108,7 @@ def mutation(pop_after_cross, r_mut):
     #print(population_nextgen)
     return population_nextgen
 
-def generations(n_pop, n_feat, n_parents, r_mut, n_gen, X, y):
+def generations(n_pop, n_feat, n_parents, r_mut, n_gen, Xtr, Xts, ytr, yts):
     population = initialization_of_population(n_pop,n_feat)
     # keep track of best solution
     best_chromo = []
@@ -118,14 +123,63 @@ def generations(n_pop, n_feat, n_parents, r_mut, n_gen, X, y):
         best_score.append(scores[0])
     return best_chromo, best_score
 
-#increased n_pop, n_parents, and r_mut led to decreased AUC
-# increased n_pop, n_parents and decreased r_mut led to increased AUC!
-chromo, score = generations(n_pop=400, n_feat=8, n_parents = 50, r_mut=0.001, n_gen=38, X=X, y=y)
-new_scores = cross_val_score(clf, X.iloc[:,chromo[-1]], y, cv = 10)
-print("Accuracy score after genetic algorithm is: %.2f%%" % (np.mean(new_scores)*100.00))
+# empty values for auc curves
+tprs = []
+aucs = []
+mean_fpr = np.linspace(0,1,100)
+
+# empty list for confusion matrix 
+conf_matrix_list_of_arrays = []
+
+fig, ax = plt.subplots()
+for i, (train, test) in enumerate(skf.split(X, y)):
+    # create testing and training sets
+    Xtr = X.iloc[train]
+    Xts = X.iloc[test]
+    ytr = y[train]
+    yts = y[test]
+
+    # run genetic algorithm for these testing and training sets
+    chromo, score = generations(n_pop=200, n_feat=8, n_parents = 10, r_mut=0.01, n_gen=40,
+        Xtr=Xtr, Xts = Xts, ytr=ytr, yts = yts)
+    
+    # fit the model to result of genetic algorithm
+    clf.fit(Xtr.iloc[:, chromo[-1]], ytr)
+
+    # get information for auc curve
+    viz = plot_roc_curve(clf, Xts.iloc[:, chromo[-1]], yts, name = 'ROC fold {}'.format(i))
+    interp_tpr = np.interp(mean_fpr, viz.fpr, viz.tpr)
+    interp_tpr[0] = 0.0
+    tprs.append(interp_tpr)
+    aucs.append(viz.roc_auc)
+
+    # get information for confusion matrix
+    conf_matrix = confusion_matrix(yts, clf.predict(Xts.iloc[:, chromo[-1]]), labels = clf.classes_)
+    conf_matrix_list_of_arrays.append(conf_matrix)
 
 
-# try to do repeated k-fold cv
-# data_dmatrix = xgb.DMatrix(data=X,label=y)
-# params = {"objective":"binary:logistic",'learning_rate': 0.1,'max_depth': 5, 'alpha': 10}
+ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
+        label='Chance', alpha=.8)
 
+mean_tpr = np.mean(tprs, axis=0)
+mean_tpr[-1] = 1.0
+mean_auc = auc(mean_fpr, mean_tpr)
+std_auc = np.std(aucs)
+ax.plot(mean_fpr, mean_tpr, color='b',
+        label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
+        lw=2, alpha=.8)
+
+std_tpr = np.std(tprs, axis=0)
+tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
+                label=r'$\pm$ 1 std. dev.')
+
+ax.set(xlim=[-0.05, 1.05], ylim=[-0.05, 1.05],
+       title="Receiver Operating Characteristic for Proposed Model")
+ax.legend(loc="lower right")
+plt.show()
+
+mean_of_conf_matrix_arrays = np.mean(conf_matrix_list_of_arrays, axis=0)
+disp = ConfusionMatrixDisplay(confusion_matrix=mean_of_conf_matrix_arrays, display_labels=clf.classes_)
+disp.plot()
