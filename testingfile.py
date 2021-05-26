@@ -16,14 +16,14 @@ from sklearn.model_selection import cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import auc, plot_roc_curve, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import f1_score, auc, average_precision_score, confusion_matrix, ConfusionMatrixDisplay, roc_curve, precision_recall_curve
 
 
 # load data
 data = pd.read_csv(r'C:\Users\danah\Documents\SeniorThesis\diabetes.csv')
 # split data into X and y
 X = data.drop(columns = ['Outcome'])
-y = data['Outcome'].to_numpy()
+y = data['Outcome']
 
 X.Pregnancies = np.where(X.Pregnancies != 0, 1, X.Pregnancies)
 missing_cols = tuple([X.columns[i] for i in range(1,7)])
@@ -51,15 +51,13 @@ scale_pos_weight=1,
 seed=27, 
 use_label_encoder = False)
 
-skf = StratifiedKFold(n_splits=5)
+skf = StratifiedKFold(n_splits=10)
 
 clf = Pipeline([
         ('scaler', scaler), 
         ('imputer', imputer),
         ('XGBoost', model)])
 
-cv_results = cross_validate(clf, X, y, cv = skf, scoring = 'roc_auc')
-print("Accuracy score before genetic algorithm: %.2f%%" % (np.mean(cv_results['test_score']) * 100.0))
 
 #defining various steps required for the genetic algorithm
 def initialization_of_population(size,n_feat):
@@ -71,12 +69,12 @@ def initialization_of_population(size,n_feat):
         population.append(chromosome)
     return population
 
-def fitness_score(population):
+def fitness_score(population, Xtr, ytr, Xts, yts):
     scores = []
     for chromosome in population:
         clf.fit(Xtr.iloc[:, chromosome], ytr)
-        predictions = clf.predict_proba(Xts.iloc[:, chromosome])
-        scores.append(roc_auc_score(yts, predictions[:,1])) # predictions must be 1d array
+        predictions = clf.predict(Xts.iloc[:, chromosome])
+        scores.append(f1_score(yts, predictions)) # predictions must be 1d array
     scores, population = np.array(scores), np.array(population) 
     inds = np.argsort(scores)
     return list(scores[inds][::-1]), list(population[inds,:][::-1])
@@ -114,7 +112,7 @@ def generations(n_pop, n_feat, n_parents, r_mut, n_gen, Xtr, Xts, ytr, yts):
     best_chromo = []
     best_score = []
     for i in range(n_gen):
-        scores, pop_after_fit = fitness_score(population)
+        scores, pop_after_fit = fitness_score(population, Xtr, ytr, Xts, yts)
         #print(scores[:2])
         pop_after_sel = selection(pop_after_fit,n_parents)
         pop_after_cross = crossover(pop_after_sel)
@@ -123,63 +121,157 @@ def generations(n_pop, n_feat, n_parents, r_mut, n_gen, Xtr, Xts, ytr, yts):
         best_score.append(scores[0])
     return best_chromo, best_score
 
-# empty values for auc curves
-tprs = []
-aucs = []
-mean_fpr = np.linspace(0,1,100)
 
-# empty list for confusion matrix 
-conf_matrix_list_of_arrays = []
+def draw_cv_pr_curve(classifier, cv, X, y, title='PR Curve'):
+    """
+    Draw a Cross Validated PR Curve.
+    Keyword Args:
+        classifier: Classifier Object
+        cv: StratifiedKFold Object: (https://stats.stackexchange.com/questions/49540/understanding-stratified-cross-validation)
+        X: Feature Pandas DataFrame
+        y: Response Pandas Series
 
-fig, ax = plt.subplots()
-for i, (train, test) in enumerate(skf.split(X, y)):
-    # create testing and training sets
-    Xtr = X.iloc[train]
-    Xts = X.iloc[test]
-    ytr = y[train]
-    yts = y[test]
+    Largely taken from: https://stackoverflow.com/questions/29656550/how-to-plot-pr-curve-over-10-folds-of-cross-validation-in-scikit-learn
+    """
+    y_real = []
+    y_proba = []
 
-    # run genetic algorithm for these testing and training sets
-    chromo, score = generations(n_pop=200, n_feat=8, n_parents = 10, r_mut=0.01, n_gen=40,
+    i = 0
+    for i, (train, test) in enumerate(cv.split(X, y)):
+        # create testing and training sets
+        Xtr = X.iloc[train]
+        Xts = X.iloc[test]
+        ytr = y.iloc[train]
+        yts = y.iloc[test]
+
+        # run genetic algorithm for these testing and training sets
+        chromo, score = generations(n_pop=200, n_feat=8, n_parents = 10, r_mut=0.05, n_gen=20,
         Xtr=Xtr, Xts = Xts, ytr=ytr, yts = yts)
+        probas_ = classifier.fit(Xtr.iloc[:,chromo[-1]], ytr).predict_proba(Xts.iloc[:, chromo[-1]])
+        # Compute ROC curve and area the curve
+        precision, recall, _ = precision_recall_curve(yts, probas_[:, 1])
+
+        # Plotting each individual PR Curve
+        plt.plot(recall, precision, lw=1, alpha=0.3,
+                 label='PR fold %d (AUC = %0.2f)' % (i, average_precision_score(yts, probas_[:, 1])))
+
+        y_real.append(yts)
+        y_proba.append(probas_[:, 1])
+
+
+    y_real = np.concatenate(y_real)
+    y_proba = np.concatenate(y_proba)
+
+    precision, recall, _ = precision_recall_curve(y_real, y_proba)
+
+    plt.plot(recall, precision, color='b',
+             label=r'Precision-Recall (AUC = %0.2f)' % (average_precision_score(y_real, y_proba)),
+             lw=2, alpha=.8)
+
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.show()
+
+
+def draw_cv_norm_conf_matrix(classifier, cv, X, y):
+    """
+    Draw a Cross Validated PR Curve.
+    Keyword Args:
+        classifier: Classifier Object
+        cv: StratifiedKFold Object: (https://stats.stackexchange.com/questions/49540/understanding-stratified-cross-validation)
+        X: Feature Pandas DataFrame
+        y: Response Pandas Series
+
+    Largely taken from: https://stackoverflow.com/questions/40057049/using-confusion-matrix-as-scoring-metric-in-cross-validation-in-scikit-learn
+    """
+    # empty list for confusion matrix 
+    conf_matrix_list_of_arrays = []
+    for i, (train, test) in enumerate(cv.split(X, y)):
+        # create testing and training sets
+        Xtr = X.iloc[train]
+        Xts = X.iloc[test]
+        ytr = y.iloc[train]
+        yts = y.iloc[test]
+
+        # run genetic algorithm for these testing and training sets
+        chromo, score = generations(n_pop=200, n_feat=8, n_parents = 10, r_mut=0.05, n_gen=20,
+        Xtr=Xtr, Xts = Xts, ytr=ytr, yts = yts)
+        
+        # get information for confusion matrix
+        conf_matrix = confusion_matrix(yts, classifier.predict(Xts.iloc[:,chromo[-1]]), labels = classifier.classes_, normalize = 'true') # normalized confusion matrix -> eases interpretation
+        conf_matrix_list_of_arrays.append(conf_matrix)
     
-    # fit the model to result of genetic algorithm
-    clf.fit(Xtr.iloc[:, chromo[-1]], ytr)
-
-    # get information for auc curve
-    viz = plot_roc_curve(clf, Xts.iloc[:, chromo[-1]], yts, name = 'ROC fold {}'.format(i))
-    interp_tpr = np.interp(mean_fpr, viz.fpr, viz.tpr)
-    interp_tpr[0] = 0.0
-    tprs.append(interp_tpr)
-    aucs.append(viz.roc_auc)
-
-    # get information for confusion matrix
-    conf_matrix = confusion_matrix(yts, clf.predict(Xts.iloc[:, chromo[-1]]), labels = clf.classes_)
-    conf_matrix_list_of_arrays.append(conf_matrix)
+    mean_of_conf_matrix_arrays = np.mean(conf_matrix_list_of_arrays, axis=0)
+    disp = ConfusionMatrixDisplay(confusion_matrix=mean_of_conf_matrix_arrays, display_labels=classifier.classes_) 
+    disp.plot()
 
 
-ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
-        label='Chance', alpha=.8)
+def draw_cv_roc_curve(classifier, cv, X, y, title='ROC Curve'):
+    """
+    Draw a Cross Validated ROC Curve.
+    Keyword Args:
+        classifier: Classifier Object
+        cv: StratifiedKFold Object: (https://stats.stackexchange.com/questions/49540/understanding-stratified-cross-validation)
+        X: Feature Pandas DataFrame
+        y: Response Pandas Series
+    Example largely taken from http://scikit-learn.org/stable/auto_examples/model_selection/plot_roc_crossval.html#sphx-glr-auto-examples-model-selection-plot-roc-crossval-py
+    """
+    # Creating ROC Curve with Cross Validation
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
 
-mean_tpr = np.mean(tprs, axis=0)
-mean_tpr[-1] = 1.0
-mean_auc = auc(mean_fpr, mean_tpr)
-std_auc = np.std(aucs)
-ax.plot(mean_fpr, mean_tpr, color='b',
-        label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
-        lw=2, alpha=.8)
+    for i, (train, test) in enumerate(cv.split(X, y)):
+        # create testing and training sets
+        Xtr = X.iloc[train]
+        Xts = X.iloc[test]
+        ytr = y.iloc[train]
+        yts = y.iloc[test]
 
-std_tpr = np.std(tprs, axis=0)
-tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
-tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
-ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
-                label=r'$\pm$ 1 std. dev.')
+        # run genetic algorithm for these testing and training sets
+        chromo, score = generations(n_pop=200, n_feat=8, n_parents = 10, r_mut=0.05, n_gen=20,
+        Xtr=Xtr, Xts = Xts, ytr=ytr, yts = yts)
+        probas_ = classifier.fit(Xtr.iloc[:,chromo[-1]], ytr).predict_proba(Xts.iloc[:, chromo[-1]])
+        # Compute ROC curve and area the curve
+        fpr, tpr, thresholds = roc_curve(yts, probas_[:, 1])
+        tprs.append(interp(mean_fpr, fpr, tpr))
 
-ax.set(xlim=[-0.05, 1.05], ylim=[-0.05, 1.05],
-       title="Receiver Operating Characteristic for Proposed Model")
-ax.legend(loc="lower right")
-plt.show()
+        tprs[-1][0] = 0.0
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        plt.plot(fpr, tpr, lw=1, alpha=0.3,
+                 label='ROC fold %d (AUC = %0.2f)' % (i, roc_auc))
 
-mean_of_conf_matrix_arrays = np.mean(conf_matrix_list_of_arrays, axis=0)
-disp = ConfusionMatrixDisplay(confusion_matrix=mean_of_conf_matrix_arrays, display_labels=clf.classes_)
-disp.plot()
+
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
+             label='Luck', alpha=.8)
+
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs)
+    plt.plot(mean_fpr, mean_tpr, color='b',
+             label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
+             lw=2, alpha=.8)
+
+    std_tpr = np.std(tprs, axis=0)
+    tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+    plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
+                     label=r'$\pm$ 1 std. dev.')
+
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.show()
+
+draw_cv_pr_curve(clf, skf, X, y)
+#draw_cv_norm_conf_matrix(clf, skf, X, y)
+draw_cv_roc_curve(clf, skf, X, y)
