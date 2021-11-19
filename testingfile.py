@@ -82,7 +82,7 @@ def baseline_metrics(classifier, cv, X, y, title1, title2):
 
     conf_matrix_list_of_arrays = []
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 10))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
     for i, (train, test) in enumerate(cv.split(X, y)):
         # create testing and training sets
@@ -136,7 +136,7 @@ def baseline_metrics(classifier, cv, X, y, title1, title2):
     ax1.xaxis.set(ticks = [-0.05, 1.05])
     ax1.yaxis.set(ticks = [-0.05, 1.05])
     ax1.set(title = title1, xlabel = 'Recall', ylabel = 'Precision')
-    ax1.legend(loc="lower right", bbox_to_anchor=(1.7, 0))
+    ax1.legend(loc="upper right", bbox_to_anchor=(1.7, 1))
 
     # complete ROC AUC figure
     ax2.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
@@ -161,7 +161,7 @@ def baseline_metrics(classifier, cv, X, y, title1, title2):
     ax2.set(title = title2, xlabel='False Positive Rate', ylabel = 'True Positive Rate')
     ax2.legend(loc="lower right", bbox_to_anchor=(1.7, 0))
     
-    fig.tight_layout() #Adjust the spacing between subplots
+    fig.subplots_adjust(wspace = 1) #Adjust the spacing between subplots
     plt.show()
 
     # complete Confusion Matrix Display
